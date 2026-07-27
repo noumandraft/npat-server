@@ -4,6 +4,13 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 
+process.on('uncaughtException', (err) => {
+    console.error('UNCAUGHT EXCEPTION:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('UNHANDLED REJECTION:', reason);
+});
+
 const app = express();
 app.use(cors());
 
@@ -41,8 +48,11 @@ io.on('connection', (socket) => {
         currentRound: 1,
         totalRounds: 3,
         timerLimit: 60,
+        buzzerMode: true,
+        categories: ['name', 'place', 'animal', 'thing'],
         pendingAnswers: {}, 
-        vetosSubmitted: [] 
+        vetosSubmitted: [],
+        roundScores: {}
       };
     }
 
@@ -85,8 +95,10 @@ io.on('connection', (socket) => {
   socket.on('update_settings', ({ roomId, settings }) => {
       const info = socketMap[socket.id];
       if (rooms[roomId] && info && rooms[roomId].host === info.playerId) {
-          if (settings.timerLimit) rooms[roomId].timerLimit = settings.timerLimit;
-          if (settings.totalRounds) rooms[roomId].totalRounds = settings.totalRounds;
+          if (settings.timerLimit !== undefined) rooms[roomId].timerLimit = settings.timerLimit;
+          if (settings.totalRounds !== undefined) rooms[roomId].totalRounds = settings.totalRounds;
+          if (settings.buzzerMode !== undefined) rooms[roomId].buzzerMode = settings.buzzerMode;
+          if (settings.categories !== undefined) rooms[roomId].categories = settings.categories;
           io.to(roomId).emit('room_update', rooms[roomId]);
       }
   });
@@ -117,6 +129,7 @@ io.on('connection', (socket) => {
       rooms[roomId].status = 'playing';
       rooms[roomId].currentLetter = generateLetter();
       rooms[roomId].vetosSubmitted = [];
+      rooms[roomId].roundScores = {};
       rooms[roomId].players.forEach(p => { p.answers = {}; p.hasSubmitted = false; });
       io.to(roomId).emit('game_started', rooms[roomId]);
   }
@@ -128,6 +141,13 @@ io.on('connection', (socket) => {
           if (player && !player.hasSubmitted) {
               player.answers = answers;
               player.hasSubmitted = true;
+              
+              // BUZZER MECHANIC
+              const submittedCount = rooms[roomId].players.filter(p => p.hasSubmitted).length;
+              if (rooms[roomId].buzzerMode && submittedCount === 1 && rooms[roomId].status === 'playing') {
+                  io.to(roomId).emit('buzzer_pressed', info.playerId);
+              }
+              
               io.to(roomId).emit('player_submitted', info.playerId);
           }
 
@@ -136,6 +156,13 @@ io.on('connection', (socket) => {
               rooms[roomId].pendingAnswers = groupAnswers(roomId);
               rooms[roomId].status = 'voting';
               rooms[roomId].vetosSubmitted = [];
+              
+              // Initialize vetoCounts dynamically based on current categories
+              rooms[roomId].vetoCounts = {};
+              rooms[roomId].categories.forEach(cat => {
+                  rooms[roomId].vetoCounts[cat] = {};
+              });
+              
               io.to(roomId).emit('voting_started', rooms[roomId]);
           }
       }
@@ -145,7 +172,10 @@ io.on('connection', (socket) => {
       const info = socketMap[socket.id];
       if (rooms[roomId] && info) {
           if (!rooms[roomId].vetoCounts) {
-              rooms[roomId].vetoCounts = { name: {}, place: {}, animal: {}, thing: {} };
+              rooms[roomId].vetoCounts = {};
+              rooms[roomId].categories.forEach(cat => {
+                  rooms[roomId].vetoCounts[cat] = {};
+              });
           }
           
           vetos.forEach(v => {
@@ -207,8 +237,9 @@ function groupAnswers(roomId) {
     const room = rooms[roomId];
     if (!room) return {};
     
-    const categories = ['name', 'place', 'animal', 'thing'];
-    const pending = { name: {}, place: {}, animal: {}, thing: {} };
+    const categories = room.categories;
+    const pending = {};
+    categories.forEach(cat => pending[cat] = {});
 
     categories.forEach(category => {
         room.players.forEach(p => {
@@ -229,12 +260,17 @@ function groupAnswers(roomId) {
 function calculateScores(roomId) {
     const room = rooms[roomId];
     if (!room) return;
-    const categories = ['name', 'place', 'animal', 'thing'];
+    const categories = room.categories;
     const onlinePlayers = room.players.filter(p => p.online || p.hasSubmitted);
     const majorityThreshold = Math.ceil(onlinePlayers.length / 2);
 
+    room.roundScores = {};
+    room.players.forEach(p => {
+        room.roundScores[p.playerId] = { totalAdded: 0, breakdown: {} };
+    });
+
     categories.forEach(category => {
-        const answersMap = room.pendingAnswers[category];
+        const answersMap = room.pendingAnswers[category] || {};
         
         Object.keys(answersMap).forEach(ans => {
             const vetoCount = room.vetoCounts?.[category]?.[ans] || 0;
@@ -246,8 +282,17 @@ function calculateScores(roomId) {
                 
                 pIds.forEach(id => {
                     const player = room.players.find(p => p.playerId === id);
-                    if (player) {
+                    if (player && room.roundScores[id]) {
                         player.score += points;
+                        room.roundScores[id].totalAdded += points;
+                        room.roundScores[id].breakdown[category] = { word: ans, points };
+                    }
+                });
+            } else {
+                const pIds = answersMap[ans];
+                pIds.forEach(id => {
+                    if (room.roundScores[id]) {
+                        room.roundScores[id].breakdown[category] = { word: ans, points: 0, vetoed: true };
                     }
                 });
             }
@@ -255,7 +300,7 @@ function calculateScores(roomId) {
     });
 }
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3005;
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
