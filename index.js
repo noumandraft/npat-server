@@ -16,10 +16,9 @@ app.use(cors());
 
 const server = http.createServer(app);
 
-// Strict CORS for deployment
-const allowedOrigin = process.env.FRONTEND_URL || "http://localhost:5173";
+// Completely open CORS to avoid any Hostinger/Render connection blocks
 const io = new Server(server, {
-  cors: { origin: allowedOrigin, methods: ["GET", "POST"] }
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 const rooms = {};
